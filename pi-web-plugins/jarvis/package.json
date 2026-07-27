@@ -1,0 +1,10 @@
+{
+  "name": "@pi-web/jarvis-plugin",
+  "private": true,
+  "type": "module",
+  "piWeb": {
+    "plugins": [
+      { "id": "jarvis", "module": "pi-web-plugin.js", "machineSpecific": true }
+    ]
+  }
+}

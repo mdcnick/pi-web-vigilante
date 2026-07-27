@@ -35,6 +35,7 @@ import { MachineService } from "./machines/machineService.js";
 import { registerMachineRoutes } from "./machines/machineRoutes.js";
 import { registerMachineProxyRoutes } from "./machines/machineProxyRoutes.js";
 import { proxyMachinePluginAsset, registerMachinePluginProxyRoutes } from "./machines/machinePluginProxyRoutes.js";
+import { registerJarvisRoutes } from "./jarvisRoutes.js";
 import type { Project, Workspace } from "./types.js";
 
 export interface AppDependencies {
@@ -217,6 +218,7 @@ export async function buildApp(deps: AppDependencies = {}): Promise<FastifyInsta
 
   registerMachineRoutes(app, machines);
   registerMachinePluginProxyRoutes(app, machines);
+  registerJarvisRoutes(app, { projects, workspaces, sessionDaemon, machines });
 
   registerLocalProjectRoutes(app, projects, workspaces, "/api", { config: configService });
   registerLocalProjectRoutes(app, projects, workspaces, "/api/machines/local", { config: configService });
