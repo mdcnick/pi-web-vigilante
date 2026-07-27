@@ -5,21 +5,18 @@ import { isCachedNewSessionInfo } from "../cachedNewSessions";
 import { shortSessionId } from "../sessionLabels";
 import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPersistence";
 import { isSessionActive } from "../../../shared/activity";
+import { allDescendantCounts, sessionIdsForCurrentTree, sessionRows, sessionRowsForCurrentTree, unarchivedDescendantCounts, type SessionRow } from "../sessionListTree";
 import { actionMenuPanelStyle } from "./actionMenu";
 import { renderActionActivityIndicator, type ActivityIndicatorKind } from "./activityBadge";
 import type { KeyboardNavigableSection } from "./navigationFocus";
 import { activateSelectableRow, focusSelectedOrFirstSelectableRow, handleSelectableRowKeyboard } from "./selectableRow";
 import { listStyles } from "./shared";
 
+export { sessionRowsForCurrentTree } from "../sessionListTree";
+
 function sessionLabel(session: SessionInfo): string {
   if (session.name !== undefined && session.name !== "") return session.name;
   return session.firstMessage !== "" ? session.firstMessage : shortSessionId(session.id);
-}
-
-export interface SessionRow {
-  session: SessionInfo;
-  depth: number;
-  hasMissingParent: boolean;
 }
 
 type SessionSelectionScope = "current" | "archived";
@@ -63,6 +60,7 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
   @state() private openMenuSessionId: string | undefined;
   @state() private menuStyle = "";
   @state() private archivedExpanded = false;
+  @state() private expandedSessionPaths: ReadonlySet<string> = new Set();
   @state() private selectionScopes: ReadonlySet<SessionSelectionScope> = new Set();
   @state() private selectedSessionIds: ReadonlySet<string> = new Set();
 
@@ -85,8 +83,10 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
     if (changed.has("sessions")) {
       if (this.openMenuSessionId !== undefined && !this.sessions.some((session) => session.id === this.openMenuSessionId)) this.openMenuSessionId = undefined;
       if (!this.sessions.some((session) => session.archived === true)) this.archivedExpanded = false;
+      this.pruneExpandedSessionPaths();
       this.pruneSelectedSessionIds();
     }
+    if (changed.has("selected")) this.expandSelectedAncestors();
     if (changed.has("collapsed") && this.collapsed) this.openMenuSessionId = undefined;
     const previousSelected = changed.get("selected");
     if (changed.has("selected") && this.selected?.archived === true && (previousSelected?.id !== this.selected.id || previousSelected.archived !== true) && !this.archivedExpanded) {
@@ -103,29 +103,34 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
   }
 
   override render() {
-    const currentRows = sessionRowsForCurrentTree(this.sessions);
-    const currentRowIds = new Set(currentRows.map((row) => row.session.id));
-    const currentSelectableSessions = currentRows.map((row) => row.session).filter((session) => sessionSelectionScope(session) === "current");
-    const archivedRows = sessionRows(this.sessions.filter((session) => session.archived === true && !currentRowIds.has(session.id)));
-    const descendantCounts = unarchivedDescendantCounts(this.sessions);
-    const unreadCount = unreadSessionCount(currentSelectableSessions, this.unreadSessionIds, {
+    const currentRows = sessionRowsForCurrentTree(this.sessions, this.expandedSessionPaths);
+    const currentTreeIds = sessionIdsForCurrentTree(this.sessions);
+    const currentSessions = this.sessions.filter((session) => session.archived !== true);
+    const currentVisibleSessions = currentRows.map((row) => row.session).filter((session) => session.archived !== true);
+    const currentTreeSessions = this.sessions.filter((session) => currentTreeIds.has(session.id));
+    const archivedSessions = this.sessions.filter((session) => session.archived === true && !currentTreeIds.has(session.id));
+    const archivedRows = sessionRows(archivedSessions, this.expandedSessionPaths);
+    const currentDescendantCounts = allDescendantCounts(currentTreeSessions);
+    const archivedDescendantCounts = allDescendantCounts(archivedSessions);
+    const unarchivedCounts = unarchivedDescendantCounts(this.sessions);
+    const unreadCount = unreadSessionCount(currentSessions, this.unreadSessionIds, {
       statuses: this.statuses,
       activities: this.activities,
       sending: this.sending,
     });
     return html`
       <section>
-        ${this.renderHeading(currentRows.length + archivedRows.length, currentSelectableSessions, unreadCount)}
+        ${this.renderHeading(this.sessions.length, currentSessions, unreadCount)}
         ${this.collapsed ? null : html`
           <div class="list-body">
-            ${this.renderCurrentSelectionToolbar(currentSelectableSessions)}
+            ${this.renderCurrentSelectionToolbar(currentVisibleSessions)}
             ${this.startingCount > 0 ? this.renderStartingSession() : null}
-            ${currentRows.map((row) => this.renderSession(row, descendantCounts.get(row.session.id) ?? 0, "current"))}
+            ${currentRows.map((row) => this.renderSession(row, currentDescendantCounts.get(row.session.id) ?? 0, unarchivedCounts.get(row.session.id) ?? 0, "current"))}
             ${archivedRows.length > 0 ? html`
-              ${this.renderArchivedHeading(archivedRows.map((row) => row.session))}
+              ${this.renderArchivedHeading(archivedSessions)}
               ${this.archivedExpanded ? html`
                 ${this.renderArchivedSelectionToolbar(archivedRows.map((row) => row.session))}
-                ${archivedRows.map((row) => this.renderSession(row, descendantCounts.get(row.session.id) ?? 0, "archived"))}
+                ${archivedRows.map((row) => this.renderSession(row, archivedDescendantCounts.get(row.session.id) ?? 0, unarchivedCounts.get(row.session.id) ?? 0, "archived"))}
               ` : null}
             ` : null}
           </div>
@@ -240,7 +245,7 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
     `;
   }
 
-  private renderSession(row: SessionRow, descendantCount: number, scope: SessionSelectionScope) {
+  private renderSession(row: SessionRow, descendantCount: number, unarchivedDescendantCount: number, scope: SessionSelectionScope) {
     const { session } = row;
     const cappedDepth = Math.min(row.depth, 2);
     const canBulkSelect = sessionSelectionScope(session) === scope;
@@ -265,7 +270,10 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
       >
         <div class="action-main ${selectionActive ? "selecting" : ""}">
           ${showsCheckbox ? html`<input class="session-checkbox" type="checkbox" aria-label=${`Select ${sessionLabel(session)}`} .checked=${bulkSelected} @click=${(event: MouseEvent) => { event.stopPropagation(); }} @change=${() => { this.toggleSelected(session.id); }}>` : null}
-          <span class="action-name-line"><span class="action-name" dir="auto">${row.depth > 0 ? html`<span class="tree-marker">↳</span>` : null}${sessionLabel(session)}${row.depth > 2 ? html` <span class="badge">depth ${row.depth}</span>` : null}${row.hasMissingParent ? html` <span class="badge">parent unavailable</span>` : null}</span></span><small>${this.renderSessionMetaPrefix(session, status, activity)}${String(session.messageCount)} messages</small>
+          <span class="action-name-line">
+            ${descendantCount > 0 ? html`<button class="tree-toggle" title=${this.expandedSessionPaths.has(session.path) ? "Collapse child sessions" : `Show ${String(descendantCount)} child ${descendantCount === 1 ? "session" : "sessions"}`} aria-label=${this.expandedSessionPaths.has(session.path) ? "Collapse child sessions" : "Expand child sessions"} aria-expanded=${String(this.expandedSessionPaths.has(session.path))} @click=${(event: MouseEvent) => { event.stopPropagation(); this.toggleSessionExpanded(session.path); }}>${this.expandedSessionPaths.has(session.path) ? "▾" : "▸"}</button>` : row.depth > 0 ? html`<span class="tree-marker">↳</span>` : null}
+            <span class="action-name" dir="auto">${sessionLabel(session)}${descendantCount > 0 && !this.expandedSessionPaths.has(session.path) ? html` <span class="badge">${descendantCount} ${descendantCount === 1 ? "child" : "children"}</span>` : null}${row.depth > 2 ? html` <span class="badge">depth ${row.depth}</span>` : null}${row.hasMissingParent ? html` <span class="badge">parent unavailable</span>` : null}</span>
+          </span><small>${this.renderSessionMetaPrefix(session, status, activity)}${String(session.messageCount)} messages</small>
           ${this.renderActivity(indicatorKind)}
         </div>
         <div class="action-menu">
@@ -282,7 +290,7 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
                   : html`
                     ${canArchive ? html`
                       <button title="Archive session" @click=${() => { this.openMenuSessionId = undefined; this.onArchive?.(session); }}>Archive</button>
-                      ${descendantCount > 0 ? html`<button title="Archive this session and its descendants" @click=${() => { this.openMenuSessionId = undefined; this.confirmArchiveWithDescendants(session, descendantCount); }}>Archive with descendants (${descendantCount})</button>` : null}
+                      ${unarchivedDescendantCount > 0 ? html`<button title="Archive this session and its descendants" @click=${() => { this.openMenuSessionId = undefined; this.confirmArchiveWithDescendants(session, unarchivedDescendantCount); }}>Archive with descendants (${unarchivedDescendantCount})</button>` : null}
                     ` : null}
                     ${session.parentSessionPath !== undefined ? html`<button title="Detach from parent" @click=${() => { this.openMenuSessionId = undefined; this.onDetachParent?.(session); }}>Detach from parent</button>` : null}
                     ${canReloadSession ? html`<button title=${isSessionActive(this.statuses[session.id], this.activities[session.id]) ? "Stop current session activity before reloading from disk" : "Reload session from disk without refreshing Pi runtime resources"} ?disabled=${isSessionActive(this.statuses[session.id], this.activities[session.id])} @click=${() => { this.openMenuSessionId = undefined; this.onReload?.(session); }}>Reload from disk</button>` : null}
@@ -389,6 +397,33 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
     if (this.selectionScopes.has("current") && !this.sessions.some((session) => session.archived !== true)) this.closeSelection("current");
   }
 
+  private toggleSessionExpanded(sessionPath: string): void {
+    const next = new Set(this.expandedSessionPaths);
+    if (next.has(sessionPath)) next.delete(sessionPath);
+    else next.add(sessionPath);
+    this.expandedSessionPaths = next;
+  }
+
+  private expandSelectedAncestors(): void {
+    if (this.selected === undefined) return;
+    const byPath = new Map(this.sessions.map((session) => [session.path, session]));
+    const next = new Set(this.expandedSessionPaths);
+    let parentPath = this.selected.parentSessionPath;
+    const seen = new Set<string>();
+    while (parentPath !== undefined && !seen.has(parentPath)) {
+      seen.add(parentPath);
+      next.add(parentPath);
+      parentPath = byPath.get(parentPath)?.parentSessionPath;
+    }
+    if (next.size !== this.expandedSessionPaths.size) this.expandedSessionPaths = next;
+  }
+
+  private pruneExpandedSessionPaths(): void {
+    const existingPaths = new Set(this.sessions.map((session) => session.path));
+    const next = new Set([...this.expandedSessionPaths].filter((path) => existingPaths.has(path)));
+    if (next.size !== this.expandedSessionPaths.size) this.expandedSessionPaths = next;
+  }
+
   private toggleMenu(sessionId: string, target: EventTarget | null) {
     if (this.openMenuSessionId === sessionId) {
       this.openMenuSessionId = undefined;
@@ -447,8 +482,10 @@ export class SessionList extends LitElement implements KeyboardNavigableSection 
     .action-name, .section-selected { text-align: start; unicode-bidi: plaintext; }
     .action-row.unread .action-name { color: var(--pi-text-bright); font-weight: 650; }
     .plain-heading { min-width: 0; }
-    .action-name-line { min-width: 0; display: flex; align-items: flex-start; gap: 6px; }
+    .action-name-line { min-width: 0; display: flex; align-items: flex-start; gap: 4px; }
     .action-name-line .action-name { flex: 1 1 auto; min-width: 0; }
+    .tree-toggle { flex: 0 0 auto; display: inline-grid; place-items: center; width: 18px; height: 18px; margin: -1px 0 0; padding: 0; border: 0; background: transparent; color: var(--pi-muted); font-size: 12px; }
+    .tree-toggle:hover { background: var(--pi-hover); color: var(--pi-text); }
     .bulk-row .capability-hint { flex: 1 0 100%; color: var(--pi-warning); }
     .bulk-row.selecting { padding: 6px; border: 1px solid var(--pi-border-muted); border-radius: 8px; background: color-mix(in srgb, var(--pi-surface) 65%, transparent); }
     button.danger, .action-menu-panel button.danger { color: var(--pi-danger); }
@@ -490,31 +527,6 @@ function removeSessionIds(sessionIds: ReadonlySet<string>, removedIds: readonly 
   return new Set([...sessionIds].filter((sessionId) => !removed.has(sessionId)));
 }
 
-function unarchivedDescendantCounts(sessions: SessionInfo[]): Map<string, number> {
-  const childrenByParentPath = new Map<string, SessionInfo[]>();
-  for (const session of sessions) {
-    if (session.parentSessionPath === undefined) continue;
-    const children = childrenByParentPath.get(session.parentSessionPath) ?? [];
-    children.push(session);
-    childrenByParentPath.set(session.parentSessionPath, children);
-  }
-
-  const countFor = (session: SessionInfo, seenPaths: Set<string>): number => {
-    if (seenPaths.has(session.path)) return 0;
-    const nextSeenPaths = new Set(seenPaths);
-    nextSeenPaths.add(session.path);
-    let count = 0;
-    for (const child of childrenByParentPath.get(session.path) ?? []) {
-      if (nextSeenPaths.has(child.path)) continue;
-      if (child.archived !== true) count += 1;
-      count += countFor(child, nextSeenPaths);
-    }
-    return count;
-  };
-
-  return new Map(sessions.map((session) => [session.id, countFor(session, new Set())]));
-}
-
 /**
  * Resolve the activity indicator kind for a session row, or undefined when the
  * row should show no indicator. Pure so it can be unit-tested without rendering.
@@ -535,52 +547,4 @@ export function sessionRowActivityKind(
   if (sending) return "sending";
   if (isSessionActive(status, activity)) return "session";
   return unread ? "unread" : undefined;
-}
-
-export function sessionRowsForCurrentTree(sessions: SessionInfo[]): SessionRow[] {
-  const byPath = new Map(sessions.map((session) => [session.path, session]));
-  const visible = new Set<string>();
-  for (const session of sessions) {
-    if (session.archived === true) continue;
-    visible.add(session.id);
-    let parentPath = session.parentSessionPath;
-    const seenPaths = new Set<string>([session.path]);
-    while (parentPath !== undefined && !seenPaths.has(parentPath)) {
-      seenPaths.add(parentPath);
-      const parent = byPath.get(parentPath);
-      if (parent === undefined) break;
-      visible.add(parent.id);
-      parentPath = parent.parentSessionPath;
-    }
-  }
-  return sessionRows(sessions.filter((session) => visible.has(session.id)));
-}
-
-function sessionRows(sessions: SessionInfo[]): SessionRow[] {
-  const byPath = new Map(sessions.map((session) => [session.path, session]));
-  const childrenByPath = new Map<string, SessionInfo[]>();
-  const roots: SessionInfo[] = [];
-  for (const session of sessions) {
-    const parentPath = session.parentSessionPath;
-    const parent = parentPath === undefined ? undefined : byPath.get(parentPath);
-    if (parent === undefined) {
-      roots.push(session);
-      continue;
-    }
-    const children = childrenByPath.get(parent.path) ?? [];
-    children.push(session);
-    childrenByPath.set(parent.path, children);
-  }
-
-  const rows: SessionRow[] = [];
-  const visit = (session: SessionInfo, depth: number, stack: Set<string>) => {
-    if (stack.has(session.path)) return;
-    const parentPath = session.parentSessionPath;
-    rows.push({ session, depth, hasMissingParent: parentPath !== undefined && !byPath.has(parentPath) });
-    const nextStack = new Set(stack);
-    nextStack.add(session.path);
-    for (const child of childrenByPath.get(session.path) ?? []) visit(child, depth + 1, nextStack);
-  };
-  for (const root of roots) visit(root, 0, new Set());
-  return rows;
 }
