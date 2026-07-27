@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import type { SessionInfo, SessionStatus } from "../api";
 import { markCachedNewSessionInfo } from "../cachedNewSessions";
 import { isArchivableSessionInfo, isTransientNewSessionInfo } from "../sessionPersistence";
-import { sessionRowActivityKind, sessionRowsForCurrentTree, unreadSessionCount } from "./SessionList";
+import { sessionRowsForCurrentTree } from "../sessionListTree";
+import { sessionRowActivityKind, unreadSessionCount } from "./SessionList";
 
 describe("sessionRowActivityKind", () => {
   const idle = sessionStatus("s");
@@ -85,7 +86,7 @@ describe("sessionRowsForCurrentTree", () => {
     const parent = { ...session("parent"), archived: true, archivedAt: "2026-06-09T00:00:00.000Z" };
     const child = session("child", { parentSessionPath: parent.path });
 
-    expect(rowSummaries(sessionRowsForCurrentTree([parent, child]))).toEqual([
+    expect(rowSummaries(sessionRowsForCurrentTree([parent, child], new Set([parent.path])))).toEqual([
       { id: "parent", depth: 0, hasMissingParent: false },
       { id: "child", depth: 1, hasMissingParent: false },
     ]);
@@ -105,6 +106,25 @@ describe("sessionRowsForCurrentTree", () => {
 
     expect(rowSummaries(sessionRowsForCurrentTree([child]))).toEqual([
       { id: "child", depth: 0, hasMissingParent: true },
+    ]);
+  });
+
+  it("collapses child session groups by default and expands only requested branches", () => {
+    const parent = session("parent");
+    const child = session("child", { parentSessionPath: parent.path });
+    const grandchild = session("grandchild", { parentSessionPath: child.path });
+
+    expect(rowSummaries(sessionRowsForCurrentTree([parent, child, grandchild]))).toEqual([
+      { id: "parent", depth: 0, hasMissingParent: false },
+    ]);
+    expect(rowSummaries(sessionRowsForCurrentTree([parent, child, grandchild], new Set([parent.path])))).toEqual([
+      { id: "parent", depth: 0, hasMissingParent: false },
+      { id: "child", depth: 1, hasMissingParent: false },
+    ]);
+    expect(rowSummaries(sessionRowsForCurrentTree([parent, child, grandchild], new Set([parent.path, child.path])))).toEqual([
+      { id: "parent", depth: 0, hasMissingParent: false },
+      { id: "child", depth: 1, hasMissingParent: false },
+      { id: "grandchild", depth: 2, hasMissingParent: false },
     ]);
   });
 });
