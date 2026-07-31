@@ -1,0 +1,9 @@
+{
+  "name": "@pi-web/agent-browser-plugin",
+  "private": true,
+  "piWeb": {
+    "plugins": [
+      { "id": "agent-browser", "module": "pi-web-plugin.js" }
+    ]
+  }
+}
